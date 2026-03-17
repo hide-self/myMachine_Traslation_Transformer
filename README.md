@@ -1,5 +1,5 @@
 # 基于Transformer的机器翻译
-原理部分请移步：https://github.com/hide-self/myTransformer_learning
+原理部分的笔记请移步：https://github.com/hide-self/myTransformer_learning
 
 
 
@@ -307,6 +307,256 @@ if __name__ == "__main__":
 `.model`：一个二进制模型，包含如何把字符串切成子词、如何把子词变回文本，以及所有规则与 ID 映射。用于构建独热向量（后续常用）
 
 
+
+## 词嵌入层与位置编码层
+
+创建`./model`文件夹，在这之下，创建`tf_model.py`用于定义Transformer的整体模型代码
+
+
+
+**词嵌入层**
+
+vcoab就是词表维度数(见原理部分的v)，d_model就是降维后词嵌入向量维度(见原理部分的d)
+
+```python
+# 词嵌入层
+class Embeddings(nn.Module):
+    def __init__(self,d_model,vocab):
+        """
+        词嵌入层初始化
+        (输入的是一个v*1的矩阵，则词嵌入层就是一个d*v矩阵，输出为d*1矩阵，此时已经被有效降维)
+        :param d_model:相当于d最终输出的维度数
+        :param vocab:相当于v为词表大小，即独热向量维度数
+        """
+        super(Embeddings,self).__init__()
+        # Embedding层，将v*1的独热编码向量，映射成d*1的词向量
+        self.lut=nn.Embedding(vocab,d_model)
+        # 存储输出词向量的维度数d
+        self.d_model=d_model
+
+    # 前向传播
+    def forwrad(self,x):
+        # 乘以sqrt(d)是Transformer原文的做法
+        # 目的：使得嵌入向量的量级与后续残差/位置编码在同一大小尺度，稳定训练、加快收敛
+        return self.lut(x)*math.sqrt(self.d_model)
+```
+
+
+
+**位置编码层**
+
+```python
+# 位置编码层(公式见原理部分)
+class PositionalEncoding(nn.Module):
+    def __init__(self,d_model,dropout,max_len=5000,device=DEVICE):
+        super(PositionalEncoding,self).__init__()
+        self.dropout=nn.Dropout(p=dropout)  # 随机失活
+
+        # 初始化一个大小为 L*d 的全0矩阵(形状与词嵌入矩阵相同)
+        pe=torch.zeros(max_len,d_model,device=device)
+        # 生成一个位置下标的tensor矩阵(每一行都是一个位置下标)
+        position = torch.arange(0., max_len, device=DEVICE).unsqueeze(1)
+        # 这里幂运算太多，我们使用exp和log来转换实现公式中pos下面要除以的分母（由于是分母，要注意带负号）
+        div_term = torch.exp(torch.arange(0., d_model, 2, device=DEVICE) * -(math.log(10000.0) / d_model))
+
+        # 位置编码奇偶位计算
+        pe[:,0::2]=torch.sin(position*div_term)
+        pe[:,0::2]=torch.cos(position*div_term)
+
+        # 在最前面开始加1个维度，变成 1*L*d大小的矩阵(代码中相当于1*max_len*d_model大小的矩阵)
+        # (这样做方便后续与一个batch的句子所有词的embedding批量相加)
+        pe=pe.unsqueeze(0)
+        # 将pe矩阵以持久的buffer状态存下(不会作为要训练的参数)
+        self.register_buffer('pe', pe)
+
+    def forward(self,x):    # 输入的数据x就是词嵌入向量
+        # 将一个batch的句子所有词的embedding与已构建好的positional embeding相加
+        # (这里按照该批次数据的最大句子长度来取对应需要的那些positional embedding值)
+        x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
+        return self.dropout(x)  # 随机失活
+```
+
+
+
+
+
+**配置文件初步书写**
+
+创建`./config.py`这个里面存放着整个项目的可变配置部分内容，现在先存放部分配置信息，后面继续补全
+
+```python
+import torch
+
+"""
+模型参数配置
+"""
+d_model=512 #相当于词嵌入矩阵的d，用于降维
+dropout=0.1 #随机失活10%
+
+
+
+"""
+词表的配置
+"""
+# 源语言(英语)的词表大小
+src_vocab_size=32000
+# 目标语言(中文)的词表大小
+tgt_vocab_size=32000
+
+
+"""
+训练配置
+"""
+# 一个批次的大小
+batch_size=32
+# 训练的总轮次
+epoch_num=3
+# 学习率
+lr=3e-4
+
+"""
+解码和生成设置
+这些参数控制模型生成输出时的行为，影响生成的句子质量。
+"""
+
+
+"""
+文件路径和模型配置
+这些参数用于定义文件路径和是否加载预训练模型的设置。
+"""
+data_dir = './data'
+train_data_path = './data/json/train.json'
+dev_data_path = './data/json/dev.json'
+test_data_path = './data/json/test.json'
+
+model_path = './weights/transformer_model.pth'
+test_model_path = './run/train/exp/weights/best_bleu_26.30.pth'
+
+
+"""
+设备配置
+这些参数用于配置模型运行的硬件设备。
+"""
+# 指定使用的GPU设备的ID。
+# 指定设备ID的列表。
+gpu_id = '0'
+device_id = [0]
+# set device
+if gpu_id != '':
+    device = torch.device(f"cuda:{gpu_id}")
+else:
+    device = torch.device('cpu')
+```
+
+
+
+
+
+## 注意力机制
+
+依旧定义到`./model/tf_model.py`中
+
+
+
+定义attention函数
+
+**传入：**
+
+Q、K、V三个矩阵
+
+mask掩码矩阵，掩码矩阵为0的部分，到时候会填充为负无穷
+
+dropout随机失活函数
+
+**输出：**
+
+注意力机制矩阵、注意力机制得分矩阵
+
+
+
+```python
+# 注意力机制
+def attention(query,key,value,mask=None,dropout=None):
+    """
+    注意力机制
+    :param query:Q矩阵，形状L*d_k
+    :param key: K矩阵，形状L*d_k
+    :param value:V矩阵，形状L*d_k
+    :param mask:掩码矩阵，哪些部分为0，到时候scores就填充负无穷
+    :param dropout:随机失活函数
+    :return:
+    """
+    d_k=query.size(-1)
+
+    # Q与K^T做矩阵相乘，然后除以根号下d_k
+    scores=torch.matmul(query,key.transpose(-2,-1))/math.sqrt(d_k)
+    # tensor.transpose(dim1.dim2)表示将dim1与dim2两个维度交换
+
+    if mask is not None:    # mask不是None
+        scores.masked_fill(mask==0,1e-9)    # mask为0的元素位置，在scores中填充为负无穷
+
+    # softmax函数，获得注意力机制得分矩阵
+    # softmax按照列维度来进行处理
+    # 这样就表示，以当前行作为查询，同一行中所有列作为索引，同一行中所有列的值加起来为1
+    p_attn=F.softmax(scores,dim=-1)
+
+    # dropout随机失活函数
+    if dropout is not None:
+        p_attn=dropout(p_attn)
+
+    # 输出：注意力机制矩阵、注意力机制得分矩阵
+    return torch.matmul(p_attn,value),p_attn
+```
+
+
+
+## 多头注意力机制
+
+定义到`./model/tf_model.py`中
+
+```python
+# 深拷贝N个模块
+def clones(module, N):
+    """克隆模型块，克隆的模型块参数不共享"""
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+
+# 多头注意力机制
+class MutiHeadedAttention(nn.Module):
+    def __init__(self,h,d_model,dropout=0.1):
+        """
+        初始化多头注意力机制类
+        :param h: h表示头数
+        :param d_model: 词嵌入矩阵L*d中的d
+        :param dropout: 随机失活概率
+        """
+        # 保证可以整除
+        assert d_model%h==0
+        # 通过d_model、h获得d_k，这样获得的d_k便于计算
+        self.d_k=d_model//h
+        #head数量
+        self.h=h
+        #4个全连接函数，供应 WQ、WK、WV矩阵和最后h个多头注意力矩阵concat之后进行变换的矩阵W_o
+        self.linears=clones(nn.Linear(d_model,d_model),4)
+        self.attn=None
+        self.dropout=nn.Dropout(p=dropout)
+
+    def forward(self,query,key,value,mask=None):
+        if mask is not None:
+            mask=mask.unsqueeze(1)
+        # query的第一个维度值为batch size
+        nbatches=query.size(0)
+        # 将embedding层乘以WQ，WK，WV矩阵(均为全连接)
+        # 并将结果拆成h块，然后将第二个和第三个维度值互换(具体过程见上述解析)
+        # 最后query、key、value，就是含有h个元素的列表，他们就是h
+        query, key, value = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+                             for l, x in zip(self.linears, (query, key, value))]
+        #调用attention函数
+        x,self.attn=attention(query,key, value, mask,self.dropout)
+        # 将h个多头注意力矩阵concat起来（注意要先把h变回到第三维的位置）
+        x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
+        # 使用self.linears中构造的最后一个全连接函数来存放变换后的矩阵进行返回
+        return self.linears[-1](x)
+```
 
 
 
