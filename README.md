@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
 
 
-脚本tokenize.py
+创建文件夹`./tokenizer`文件夹，之后创建脚本`tokenize.py`
 
 ```python
 # 导入 SentencePiece 库：用于无监督训练子词（BPE/Unigram）模型以及后续编码/解码
@@ -388,37 +388,62 @@ class PositionalEncoding(nn.Module):
 import torch
 
 """
-模型参数配置
+模型超参数配置
+这一类参数决定了模型架构的规模和计算复杂度。
+更高的维度、更多的层和头可以增强模型的能力，但也会增加计算和训练时间。
 """
-d_model=512 #相当于词嵌入矩阵的d，用于降维
-dropout=0.1 #随机失活10%
-
-
+# d_model = 512 表示模型的每个token的表示将使用512维的向量，这也决定了Transformer中间层的大小。
+d_model = 512
+# 多头注意力机制中的头数。
+n_heads = 8
+# n_layers = 6表示模型中有6个Transformer编码器和解码器层。
+n_layers = 6
+# 自注意力机制中每个头的键（Key）向量的维度。
+d_k = 64
+# 自注意力机制中每个头的值（Value）向量的维度。
+d_v = 64
+# d_ff是前馈网络隐藏层的大小。d_ff = 2048表示前馈层的维度为2048。
+d_ff = 2048
+# dropout = 0.1表示在训练过程中，随机丢弃10%的神经元来避免模型过拟合。
+dropout = 0.1
 
 """
-词表的配置
+词汇表和标记配置
+这些参数控制词汇表的大小和特殊标记的设置。
+这一类参数涉及到数据预处理、分词和输入的标记设置。
 """
-# 源语言(英语)的词表大小
-src_vocab_size=32000
-# 目标语言(中文)的词表大小
-tgt_vocab_size=32000
-
+# 源语言（英语）的词汇表大小。
+src_vocab_size = 32000
+# 目标语言（中文）的词汇表大小。
+tgt_vocab_size = 32000
+# padding_idx = 0表示填充token的索引为0，这通常用于填充短句，使得每个句子都具有相同的长度。
+padding_idx = 0
+# bos_idx = 2表示句子的开始符号（BOS）的索引是2。
+bos_idx = 2
+# eos_idx = 3表示句子的结束符号（EOS）的索引是3。
+eos_idx = 3
 
 """
 训练配置
+这些参数控制训练过程中的配置和训练策略。
 """
-# 一个批次的大小
-batch_size=32
-# 训练的总轮次
-epoch_num=3
-# 学习率
-lr=3e-4
+# 训练时的批次大小。
+batch_size = 32
+# 训练的总轮次。
+epoch_num = 3
+# 学习率（learning rate）。
+lr = 3e-4
 
 """
 解码和生成设置
 这些参数控制模型生成输出时的行为，影响生成的句子质量。
 """
-
+# greed decode的最大句子长度
+# max_len = 60表示解码时生成的最大句子长度为60个token。
+max_len = 60
+# 在计算BLEU评分时使用的Beam Search的大小。
+# beam_size = 3表示在解码时，使用大小为3的Beam Search进行翻译。
+beam_size = 3
 
 """
 文件路径和模型配置
@@ -429,9 +454,9 @@ train_data_path = './data/json/train.json'
 dev_data_path = './data/json/dev.json'
 test_data_path = './data/json/test.json'
 
+
 model_path = './weights/transformer_model.pth'
 test_model_path = './run/train/exp/weights/best_bleu_26.30.pth'
-
 
 """
 设备配置
@@ -439,13 +464,7 @@ test_model_path = './run/train/exp/weights/best_bleu_26.30.pth'
 """
 # 指定使用的GPU设备的ID。
 # 指定设备ID的列表。
-gpu_id = '0'
-device_id = [0]
-# set device
-if gpu_id != '':
-    device = torch.device(f"cuda:{gpu_id}")
-else:
-    device = torch.device('cpu')
+device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ```
 
 
@@ -521,7 +540,7 @@ def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 # 多头注意力机制
-class MutiHeadedAttention(nn.Module):
+class MultiHeadedAttention(nn.Module):
     def __init__(self,h,d_model,dropout=0.1):
         """
         初始化多头注意力机制类
@@ -529,6 +548,8 @@ class MutiHeadedAttention(nn.Module):
         :param d_model: 词嵌入矩阵L*d中的d
         :param dropout: 随机失活概率
         """
+        super(MultiHeadedAttention,self).__init__()
+
         # 保证可以整除
         assert d_model%h==0
         # 通过d_model、h获得d_k，这样获得的d_k便于计算
@@ -560,3 +581,590 @@ class MutiHeadedAttention(nn.Module):
 
 
 
+## 层归一化
+
+定义到`./model/tf_model.py`中
+
+
+
+公式：
+
+$y=a \frac{x-\mu}{\sqrt{\sigma^2+eps}}+b$
+
+层归一化的 $\mu、\sigma$都是按照词向量矩阵的特征维度，也就是d那个维度进行求均值、方差的操作的
+
+a、b都是可学习参数
+
+```python
+# 层归一化
+class layerNorm(nn.Module):
+    def __init__(self,features,eps=1e-6):
+        """
+
+        :param features: 相当于词向量的维度d
+        :param eps:一个很小的常数，用于数值稳定性，避免分母为零
+        """
+        super(layerNorm,self).__init__()
+        # 初始化 α为全1，β为全0
+        self.a_2=nn.Parameter(torch.ones(features))
+        self.b_2 = nn.Parameter(torch.zeros(features))
+        # 平滑项
+        self.eps = eps
+
+    def forward(self,x):
+        # x是神经网络层的输出
+        # 按照词表特征的维度，也就是d那个维度进行均值方差计算
+        # keepdim=True确保输出维度与输入维度在d以外的其他维度一致
+        mean=x.mean(-1,keepdim=True)    # d就处在最后一个维度
+        std=x.std(-1,keepdim=True)
+
+        # Layer Norm计算公式:y=a*(x-mean)/sqrt(std**2+eps)+b
+        return self.a_2*(x-mean)/torch.sqrt(std**2+self.eps)+self.b_2
+```
+
+
+
+
+
+
+
+## 子层连接类
+
+两种顺序的对比：
+
+**Post-LN（原始 Transformer 结构）**
+
+- 顺序：**子层 → 残差连接 → 层归一化**
+
+- 公式：
+
+  $$Output=LayerNorm(x+Sublayer(x))$$
+
+- 优点：符合论文原始设计，梯度流经残差连接时不受归一化影响。
+
+- 缺点：训练深层模型时容易出现梯度消失或爆炸，需要仔细调整学习率和 warmup。
+
+**Pre-LN（你看到的代码）**
+
+- 顺序：**层归一化 → 子层 → 残差连接**
+
+- 公式：
+
+  $$Output=x+Sublayer(LayerNorm(x))$$
+
+- 优点：梯度更稳定，训练更平滑，允许训练更深的模型，且对学习率不那么敏感。BERT、GPT 等现代模型常采用此变体。
+
+
+
+定义到`./model/tf_model.py`中
+
+```python
+# 子层连接：把MultiHead Attention 或者 Feed Foward层连接
+# 之后进行层归一化、残差连接
+class SublayerConnection(nn.Module):
+    def __init__(self,size,dropout):
+        super(SublayerConnection,self).__init__()
+        self.norm=layerNorm(size)
+        self.dropout=nn.Dropout(dropout)
+
+    def forward(self,x,sublayer):
+        """
+        :param x: 模型输入的数据
+        :param sublayer: sublayer可以是多头注意力机制，也可以是前馈神经网络
+        :return:
+        """
+        # 此处与理论有些不同：先进行层归一化，再进行子层连接，最后执行残差连接
+        # 论文中的顺序容易梯度消失或爆炸
+        # 论文中的被称为 Post-LN，此处的Pre-LN更加实用（多用于新的NLP模型，例如BERT）
+        return x+self.dropout(sublayer(self.norm(x)))
+```
+
+
+
+
+
+## 编码器层与编码器
+
+EncoderLayer编码器层 是 Transformer 模型中的核心组件之一，它实现了单个编码器层的结构。每个编码器层由两个主要子层组成：多头自注意力层和前馈神经网络，并且包含残差连接和层归一化。
+Encoder编码器 由多个 EncoderLayer 堆叠而成，它是 Transformer 模型的编码器部分。Encoder 将输入的序列经过多层编码层（EncoderLayer），从而学习输入序列的上下文信息。
+
+
+
+定义到`./model/tf_model.py`中
+
+```python
+# 编码器层
+class EncoderLayer(nn.Module):
+    def __init__(self,size,self_atten,feed_forward,dropout):
+        super(EncoderLayer,self).__init__()
+        self.self_atten=self_atten
+        self.feed_forward=feed_forward
+        self.sublayer=clones(SublayerConnection(size,dropout),2)
+        self.size=size  # 相当于d_model
+
+    def foward(self,x,mask):
+        # x是词向量矩阵
+        # 接下来进行多头注意力机制操作
+        x=self.sublayer[0](x,lambda x:self.self_atten(x, x, x, mask))   # 4输入为q、k、v、mask
+        # 注意到attn得到的结果x直接作为了下一层的输入
+        return self.sublayer[1](x, self.feed_forward)
+
+
+# 编码器
+class Encoder(nn.Module):
+    # layer = EncoderLayer
+    # N = 6
+    def __init__(self, layer, N):
+        super(Encoder, self).__init__()
+        # 复制N个encoder layer
+        self.layers = clones(layer, N)
+        # Layer Norm
+        self.norm = layerNorm(layer.size)
+
+    def forward(self, x, mask):
+        """
+        使用循环连续eecode N次(这里为6次)
+        这里的Eecoderlayer会接收一个对于输入的attention mask处理
+        """
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
+```
+
+
+
+## 解码器与解码器层
+
+DecoderLayer 是 Transformer 模型中的核心组件之一，负责解码器层的计算。每个解码器层包含自注意力机制、与编码器输出的上下文进行的注意力机制以及前馈神经网络。这些子层通过 残差连接和层归一化相连。
+Decoder 是 Transformer 模型的解码器部分，由多个 DecoderLayer 堆叠而成。它将输入的上下文（来自编码器的输出 memory）和目标序列 x 逐层传递，生成最终的输出。
+
+
+
+定义到`./model/tf_model.py`中
+
+```python
+# 解码器层
+class DecoderLayer(nn.Module):
+    def __init__(self,size,self_attn,src_attn,feed_forward,dropout):
+        super(DecoderLayer, self).__init__()
+        self.size = size
+        # 自注意力机制(含因果掩码)
+        self.self_attn = self_attn
+        # 交叉注意力机制
+        self.src_attn = src_attn
+        self.feed_forward = feed_forward
+        self.sublayer = clones(SublayerConnection(size, dropout), 3)
+
+    def forward(self, x, memory, src_mask, tgt_mask):
+        # 用m来存放encoder的最终hidden表示结果
+        m = memory
+
+        # Self-Attention：注意self-attention的q，k和v均为decoder hidden
+        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, tgt_mask))
+        # Context-Attention：注意context-attention的q为decoder hidden，而k和v为encoder hidden
+        x = self.sublayer[1](x, lambda x: self.src_attn(x, m, m, src_mask))
+        return self.sublayer[2](x, self.feed_forward)
+
+
+# 解码器
+class Decoder(nn.Module):
+    def __init__(self, layer, N):
+        super(Decoder, self).__init__()
+        # 复制N个encoder layer
+        self.layers = clones(layer, N)
+        # Layer Norm
+        self.norm = layerNorm(layer.size)
+
+    def forward(self, x, memory, src_mask, tgt_mask):
+        """
+        使用循环连续decode N次(这里为6次)
+        这里的Decoderlayer会接收一个对于输入的attention mask处理
+        和一个对输出的attention mask + subsequent mask处理
+        """
+        for layer in self.layers:
+            x = layer(x, memory, src_mask, tgt_mask)
+        return self.norm(x)
+```
+
+
+
+## 生成器层
+
+
+
+![77396825652](imgs/1773968256528.png)
+
+
+
+定义到`./model/tf_model.py`中
+
+
+
+```python
+# 生成器
+class Generator(nn.Module):
+    # vocab: tgt_vocab
+    def __init__(self, d_model, vocab):
+        super(Generator, self).__init__()
+        # decode后的结果，先进入一个全连接层变为词典大小的向量
+        self.proj = nn.Linear(d_model, vocab)
+
+    def forward(self, x):
+        # 然后再进行log_softmax操作(在softmax结果上再做多一次log运算)
+        return F.log_softmax(self.proj(x), dim=-1)
+```
+
+
+
+
+
+## Transformer模型最终整合
+
+定义到`./model/tf_model.py`中
+
+
+
+```python
+# Transformer模型的最终实现
+class Transformer(nn.Module):
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+        super(Transformer, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.generator = generator
+    def encode(self, src, src_mask):
+        return self.encoder(self.src_embed(src), src_mask)
+    def decode(self, memory, src_mask, tgt, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
+    def forward(self, src, tgt, src_mask, tgt_mask):
+        # encoder的结果作为decoder的memory参数传入，进行decode
+        return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
+
+
+def make_model(src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1):
+    c = copy.deepcopy
+    # 实例化Attention对象
+    attn = MultiHeadedAttention(h, d_model).to(DEVICE)
+    # 实例化FeedForward对象
+    ff = PositionwiseFeedForward(d_model, d_ff, dropout).to(DEVICE)
+    # 实例化PositionalEncoding对象
+    position = PositionalEncoding(d_model, dropout).to(DEVICE)
+    # 实例化Transformer模型对象
+
+    model = Transformer(
+        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout).to(DEVICE), N).to(DEVICE),
+        Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout).to(DEVICE), N).to(DEVICE),
+        nn.Sequential(Embeddings(d_model, src_vocab).to(DEVICE), c(position)),
+        nn.Sequential(Embeddings(d_model, tgt_vocab).to(DEVICE), c(position)),
+        Generator(d_model, tgt_vocab)).to(DEVICE)
+
+    # 初始化模型参数
+    # 遍历模型中的所有参数
+    for p in model.parameters():
+        # 判断参数是否为二维或更高维（例如权重矩阵，而不是偏置向量）
+        if p.dim() > 1:
+            # 这里初始化采用的是nn.init.xavier_uniform
+            nn.init.xavier_uniform_(p)
+    return model.to(DEVICE)
+```
+
+
+
+## Transformer模型的训练
+
+创建`./train_Transformer.py`
+
+```python
+import config
+import torch
+from torch.utils.data import DataLoader
+
+from tools.data_loader import MTDataset
+from model.tf_model import make_model
+import logging
+import sacrebleu
+from tqdm import tqdm
+
+from beam_decoder import beam_search
+from model.train_utils import  MultiGPULossCompute, get_std_opt
+from tools.tokenizer_utils import chinese_tokenizer_load
+from tools.create_exp_folder import create_exp_folder
+
+
+logging.basicConfig(format='%(asctime)s-%(name)s-%(levelname)s-%(message)s', level=logging.INFO)
+
+def run_epoch(data, model, loss_compute):
+    total_tokens = 0.   # 初始化token的总数
+    total_loss = 0.  # 初始化总损失
+
+    # 遍历整个数据集（数据为batch的形式）
+    for batch in tqdm(data):  # tqdm用于显示处理进度条
+        # 模型前向传播，得到预测结果out
+        # batch.src：输入的源语言数据，batch.trg：目标语言数据，batch.src_mask：源语言mask，batch.trg_mask：目标语言mask
+        out = model(batch.src, batch.trg, batch.src_mask, batch.trg_mask)
+
+        # 使用loss_compute计算损失
+        # batch.trg_y：目标输出数据，batch.ntokens：非填充部分的token数量（有效token数量）
+        loss = loss_compute(out, batch.trg_y, batch.ntokens)
+
+        # 累加损失和有效tokens的数量
+        total_loss += loss
+        total_tokens += batch.ntokens
+
+    # 返回每个token的平均损失
+    return total_loss / total_tokens
+
+def train(train_data, dev_data, model, model_par, criterion, optimizer):
+    """训练并保存模型"""
+    # best_bleu_score初始化
+    best_bleu_score = -float('inf')  # 初始最佳BLEU分数为负无穷
+    # 创建保存权重的路径
+    exp_folder, weights_folder = create_exp_folder()
+
+    # 开始训练循环，迭代每个epoch
+    for epoch in range(1, config.epoch_num + 1):
+        logging.info(f"第{epoch}轮模型训练与验证")
+        # 设置模型为训练模式
+        model.train()
+        # 进行一个epoch的训练，返回当前的训练损失
+        train_loss = run_epoch(train_data, model_par,
+                               MultiGPULossCompute(model.generator, criterion, config.device_id, optimizer))
+
+        # 设置模型为评估模式（即不计算梯度，优化）
+        model.eval()
+        # 进行一个epoch的验证，返回当前的验证损失
+        dev_loss = run_epoch(dev_data, model_par,
+                             MultiGPULossCompute(model.generator, criterion, config.device_id, None))
+
+        # 计算模型在验证集（dev_data）上的BLEU分数
+        bleu_score = evaluate(dev_data, model)
+        logging.info(f"Epoch: {epoch}, train_loss: {train_loss:.3f}, val_loss: {dev_loss:.3f}, Bleu Score: {bleu_score:.2f}\n")
+
+        # 如果当前epoch的模型的BLEU分数更优，则保存最佳模型
+        if bleu_score > best_bleu_score:
+            # 如果之前已存在最优模型，先删除
+            if best_bleu_score != -float('inf'):
+                old_model_path = f"{weights_folder}/best_bleu_{best_bleu_score:.2f}.pth"
+                if os.path.exists(old_model_path):
+                    os.remove(old_model_path)
+
+            model_path_best = f"{weights_folder}/best_bleu_{bleu_score:.2f}.pth"
+            # 保存当前模型的状态字典到指定路径
+            torch.save(model.state_dict(), model_path_best)
+            # 更新最佳BLEU分数
+            best_bleu_score = bleu_score
+            # 记录最佳模型保存信息到日志
+
+        # 保存当前模型（最后一次训练）
+        if epoch == config.epoch_num:  # 判断是否达到设定的训练轮数
+            model_path_last = f"{weights_folder}/last_bleu_{bleu_score:.2f}.pth"  # 构建模型保存路径，包含BLEU分数
+            torch.save(model.state_dict(), model_path_last)  # 保存模型的状态字典
+
+def evaluate(data, model):
+    """在data上用训练好的模型进行预测，打印模型翻译结果"""
+    sp_chn = chinese_tokenizer_load()  # 加载中文分词器
+    trg = []  # 存储目标句子（真实句子）
+    res = []  # 存储模型翻译的结果
+    with torch.no_grad():  # 禁用梯度计算，节省内存和计算
+        # 在data的英文数据长度上遍历下标
+        for batch in tqdm(data):  # 使用tqdm显示进度条
+            cn_sent = batch.trg_text  # 获取当前批次的中文句子
+            src = batch.src   # 获取当前批次的源语言（英文）句子
+            src_mask = (src != 0).unsqueeze(-2)    # 为源语言句子创建mask，排除padding部分
+
+            # 使用束搜索生成模型翻译结果
+            decode_result, _ = beam_search(model, src, src_mask, config.max_len,
+                                               config.padding_idx, config.bos_idx, config.eos_idx,
+                                               config.beam_size, config.device)
+
+            # `decode_result`是一个包含多个翻译结果的列表，取最优结果
+            decode_result = [h[0] for h in decode_result]
+            # 解码后的id转为中文句子
+            translation = [sp_chn.decode_ids(_s) for _s in decode_result]
+            trg.extend(cn_sent)  # 将当前批次的真实句子添加到`trg`中
+            res.extend(translation)  # 将模型的翻译结果添加到`res`中
+
+    # 计算BLEU分数，使用SacreBLEU工具库
+    trg = [trg]  # 真实目标句子
+    bleu = sacrebleu.corpus_bleu(res, trg, tokenize='zh')  # 计算BLEU分数
+    return float(bleu.score)  # 返回BLEU分数
+
+
+def test(data, model, criterion):
+    with torch.no_grad():
+        # 加载模型
+        model.load_state_dict(torch.load(config.model_path))
+        model_par = torch.nn.DataParallel(model)
+        model.eval()
+        # 开始预测
+        test_loss = run_epoch(data, model_par,
+                              MultiGPULossCompute(model.generator, criterion, config.device_id, None))
+        bleu_score = evaluate(data, model, 'test')
+        logging.info('Test loss: {},  Bleu Score: {}'.format(test_loss, bleu_score))
+
+
+def run():
+    # 创建训练数据集和开发数据集
+    # 使用MTDataset类分别加载训练数据和开发数据
+    train_dataset = MTDataset(config.train_data_path)   # 初始化训练数据集，使用配置中指定的训练数据路径
+    dev_dataset = MTDataset(config.dev_data_path)   # 初始化开发数据集，使用配置中指定的开发数据路径
+    test_dataset = MTDataset(config.test_data_path)
+
+    # 创建训练数据加载器，用于训练过程中批量加载数据
+    # shuffle=True 表示在每个epoch开始时会打乱数据顺序，以增加模型的泛化能力
+    # batch_size=config.batch_size 表示每个批次的样本数量，具体值由配置文件决定
+    # collate_fn=train_dataset.collate_fn 表示自定义的数据整理函数，用于处理每个批次的数据
+    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=config.batch_size,
+                                  collate_fn=train_dataset.collate_fn)
+    dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=config.batch_size,
+                                collate_fn=dev_dataset.collate_fn)
+    test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=config.batch_size,
+                                 collate_fn=test_dataset.collate_fn)
+
+    # 初始化模型
+    model = make_model(config.src_vocab_size, config.tgt_vocab_size, config.n_layers,
+                       config.d_model, config.d_ff, config.n_heads, config.dropout)
+
+    #  将模型包装成数据并行模式,这样可以在多个GPU上并行处理数据，提高训练效率
+    model_par = torch.nn.DataParallel(model)
+
+    # 训练阶段，选择损失函数和优化器
+    # CrossEntropyLoss是常见的分类问题损失函数，ignore_index=0表示忽略填充部分
+    # reduction='sum'表示计算损失时会对所有token的损失求和
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=0, reduction='sum')
+
+    # 调用get_std_opt函数获取标准的Noam优化器，这通常包括学习率调度器（如预热后衰减）
+    optimizer = get_std_opt(model)
+
+    # 开始训练
+    train(train_dataloader, dev_dataloader, model, model_par, criterion, optimizer)
+    # test(test_dataloader, model, criterion)
+
+
+if __name__ == "__main__":
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    import warnings
+    warnings.filterwarnings('ignore')
+    run()
+
+```
+
+
+
+
+
+## Transformer模型的测试
+
+创建`./train_Transformer.py`
+
+```python
+import torch
+import config
+import logging
+import numpy as np
+from tools.tokenizer_utils import english_tokenizer_load
+from model.tf_model import make_model
+from tools.tokenizer_utils import chinese_tokenizer_load
+from beam_decoder import beam_search
+
+logging.basicConfig(format='%(asctime)s-%(name)s-%(levelname)s-%(message)s-%(funcName)s:%(lineno)d', level=logging.INFO)
+
+
+def translate(src, model):
+    """用训练好的模型进行预测单句，打印模型翻译结果"""
+
+    # 加载中文分词器
+    sp_chn = chinese_tokenizer_load()
+
+    with torch.no_grad():  # 禁用梯度计算，以节省内存
+        # 加载训练好的模型权重
+        model.load_state_dict(torch.load(config.test_model_path, map_location=config.device))
+        model.eval()  # 将模型设置为评估模式
+
+        # 创建源句子的掩码（mask），以确保填充的部分不会参与计算
+        src_mask = (src != 0).unsqueeze(-2)
+
+        # 使用束搜索（beam search）进行解码
+        decode_result, _ = beam_search(
+            model,
+            src,
+            src_mask,
+            config.max_len,  # 最大翻译长度
+            config.padding_idx,  # 填充符号的索引
+            config.bos_idx,  # 句子开始符号的索引
+            config.eos_idx,  # 句子结束符号的索引
+            config.beam_size,  # 束搜索的大小
+            config.device  # 设备（CPU或GPU）
+        )
+
+        # 从解码结果中提取最优结果
+        decode_result = [h[0] for h in decode_result]
+
+        # 使用中文分词器将解码结果的id转化为实际的中文词语
+        translation = [sp_chn.decode_ids(_s) for _s in decode_result]
+
+        # # 打印并返回翻译结果的第一句
+        # print(translation[0])
+        return translation[0]
+
+
+def one_sentence_translate(sent):
+    """翻译单句英文"""
+
+    # 初始化翻译模型，使用指定的参数（词汇表大小、层数、模型维度等）
+    model = make_model(
+        config.src_vocab_size,  # 源语言词汇表大小
+        config.tgt_vocab_size,  # 目标语言词汇表大小
+        config.n_layers,  # 模型的层数
+        config.d_model,  # 模型的维度（通常是隐藏层的大小）
+        config.d_ff,  # 前馈网络的维度
+        config.n_heads,  # 注意力头的数量
+        config.dropout  # dropout比率
+    )
+
+    # 加载源语言和目标语言的分词器，用于获取BOS和EOS标记
+    BOS = english_tokenizer_load().bos_id()  # 获取开始符号（BOS）的ID，通常是2
+    EOS = english_tokenizer_load().eos_id()  # 获取结束符号（EOS）的ID，通常是3
+
+    # 将输入的句子转化为token IDs，添加BOS和EOS标记
+    src_tokens = [[BOS] + english_tokenizer_load().EncodeAsIds(sent) + [EOS]]
+
+    # 将句子转换为长整型Tensor，并发送到指定的设备（如GPU或CPU）
+    batch_input = torch.LongTensor(np.array(src_tokens)).to(config.device)
+
+    # 调用translate函数进行翻译
+    return translate(batch_input, model)
+
+
+def translate_example():
+    """单句翻译示例"""
+    "The government has implemented various policies toimprove the living standards of its citizens."
+    "政府实施了诸多政策，改善公民的生活水平。"
+
+    while True:  # 使用循环，让用户可以反复输入句子
+        # 提示用户输入英文句子
+        sent = input("请输入英文句子进行翻译：")
+
+        translation = one_sentence_translate(sent)
+        # 调用翻译函数进行翻译
+        print("翻译结果：", translation)
+
+
+if __name__ == "__main__":
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    import warnings
+    warnings.filterwarnings('ignore')
+    translate_example()
+```
+
+
+
+
+
+结果：
+
+![77398063565](imgs/1773980635654.png)
